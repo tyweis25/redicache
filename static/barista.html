@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Coffee Shop - Barista Display</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 900px; margin: 40px auto; padding: 0 16px; }
+  h1 { font-size: 1.4rem; }
+  .layout { display: flex; gap: 32px; align-items: flex-start; }
+  .queue-panel { flex: 2; }
+  .side-panel { flex: 1; background: #f7f7f7; border-radius: 8px; padding: 16px; }
+  .order-card {
+    border: 1px solid #ddd; border-radius: 8px; padding: 12px 16px; margin-bottom: 10px;
+    display: flex; justify-content: space-between; align-items: center;
+  }
+  .order-card .details { font-size: 0.95rem; }
+  .order-card .details b { display: block; font-size: 1.05rem; }
+  button.complete {
+    padding: 8px 14px; cursor: pointer; background: #2e7d32; color: white; border: none; border-radius: 6px;
+  }
+  .empty-state { color: #888; font-style: italic; }
+  .leaderboard-item { display: flex; justify-content: space-between; padding: 4px 0; }
+  .pickup-panel { margin-top: 20px; }
+  .pickup-item {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 8px 10px; border-radius: 6px; background: #eef7ee; margin-bottom: 6px; font-size: 0.9rem;
+  }
+  .pickup-item .countdown { font-variant-numeric: tabular-nums; font-weight: 600; color: #2e7d32; }
+  .pickup-item .countdown.expiring-soon { color: #c62828; }
+  #status-dot {
+    display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 6px; background: #ccc;
+  }
+  #status-dot.connected { background: #2e7d32; }
+</style>
+</head>
+<body>
+  <h1>🧑‍🍳 Barista Display <span id="status-dot"></span><span id="status-text" style="font-size:0.8rem; color:#888;">connecting...</span></h1>
+
+  <div class="layout">
+    <div class="queue-panel">
+      <h2>Order Queue</h2>
+      <div id="queue-list"><p class="empty-state">Loading...</p></div>
+    </div>
+
+    <div class="side-panel">
+      <h2>🔥 Top Sellers Today</h2>
+      <div id="leaderboard-list"><p class="empty-state">Loading...</p></div>
+
+      <div class="pickup-panel">
+        <h2>🟢 Ready for Pickup</h2>
+        <div id="pickup-list"><p class="empty-state">Loading...</p></div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const queueList = document.getElementById('queue-list');
+    const leaderboardList = document.getElementById('leaderboard-list');
+    const statusDot = document.getElementById('status-dot');
+    const statusText = document.getElementById('status-text');
+
+    function renderQueue(orders) {
+      if (!orders.length) {
+        queueList.innerHTML = '<p class="empty-state">No orders in queue.</p>';
+        return;
+      }
+      queueList.innerHTML = orders.map(o => `
+        <div class="order-card">
+          <div class="details">
+            <b>#${o.id} - ${o.customer}</b>
+            ${o.size} ${o.drink}${o.milk && o.milk !== 'none' ? ' with ' + o.milk + ' milk' : ''}
+          </div>
+          <button class="complete" data-id="${o.id}">Complete</button>
+        </div>
+      `).join('');
+
+      queueList.querySelectorAll('button.complete').forEach(btn => {
+        btn.addEventListener('click', async () => {
+          const id = btn.getAttribute('data-id');
+          await fetch(`/order/${id}/complete`, { method: 'POST' });
+          // The WebSocket order_updates event will trigger a refresh,
+          // but refresh immediately too for a snappy UI.
+          loadQueue();
+        });
+      });
+    }
+
+    function renderLeaderboard(items) {
+      if (!items.length) {
+        leaderboardList.innerHTML = '<p class="empty-state">No orders yet.</p>';
+        return;
+      }
+      leaderboardList.innerHTML = items.map((item, i) => `
+        <div class="leaderboard-item">
+          <span>${i + 1}. ${item.drink}</span>
+          <span>${item.count}</span>
+        </div>
+      `).join('');
+    }
+
+    async function loadQueue() {
+      const res = await fetch('/queue');
+      renderQueue(await res.json());
+    }
+
+    async function loadLeaderboard() {
+      const res = await fetch('/leaderboard');
+      renderLeaderboard(await res.json());
+    }
+
+    // --- Pickup panel: orders in their "ready for pickup" TTL window ---
+    let pickupOrders = [];
+
+    function formatCountdown(seconds) {
+      const m = Math.floor(seconds / 60);
+      const s = seconds % 60;
+      return `${m}:${s.toString().padStart(2, '0')}`;
+    }
+
+    function renderPickup() {
+      const pickupList = document.getElementById('pickup-list');
+      if (!pickupOrders.length) {
+        pickupList.innerHTML = '<p class="empty-state">Nothing waiting for pickup.</p>';
+        return;
+      }
+      pickupList.innerHTML = pickupOrders.map(o => `
+        <div class="pickup-item">
+          <span>#${o.id} - ${o.customer} (${o.drink})</span>
+          <span class="countdown${o.seconds_remaining <= 60 ? ' expiring-soon' : ''}">${formatCountdown(o.seconds_remaining)}</span>
+        </div>
+      `).join('');
+    }
+
+    async function loadPickup() {
+      const res = await fetch('/pickup');
+      pickupOrders = await res.json();
+      renderPickup();
+    }
+
+    // Resync with the server every 5s (same cadence as the leaderboard - this
+    // panel isn't latency-critical the way the live queue is).
+    setInterval(loadPickup, 5000);
+
+    // Tick the displayed countdown down locally every second between resyncs,
+    // so it reads as a smooth live timer rather than jumping every 5s.
+    setInterval(() => {
+      pickupOrders = pickupOrders
+        .map(o => ({ ...o, seconds_remaining: o.seconds_remaining - 1 }))
+        .filter(o => o.seconds_remaining > 0);
+      renderPickup();
+    }, 1000);
+
+    // Initial load
+    loadQueue();
+    loadLeaderboard();
+    loadPickup();
+
+    // Leaderboard: light polling every 5s (deliberately not pub/sub - see writeup)
+    setInterval(loadLeaderboard, 5000);
+
+    // Queue: live updates via WebSocket <- Redis Pub/Sub bridge on the backend
+    function connectWebSocket() {
+      const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+      const ws = new WebSocket(`${protocol}//${location.host}/ws`);
+
+      ws.onopen = () => {
+        statusDot.classList.add('connected');
+        statusText.textContent = 'live';
+      };
+
+      ws.onmessage = (event) => {
+        // event.data is the JSON published to the order_updates channel,
+        // e.g. {"event": "new_order", "id": 3} or {"event": "order_completed", "id": 3}
+        loadQueue();
+        loadPickup();
+      };
+
+      ws.onclose = () => {
+        statusDot.classList.remove('connected');
+        statusText.textContent = 'reconnecting...';
+        setTimeout(connectWebSocket, 2000);
+      };
+
+      ws.onerror = () => ws.close();
+    }
+    connectWebSocket();
+  </script>
+</body>
+</html>
